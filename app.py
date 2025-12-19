@@ -15,23 +15,95 @@
 
 import sys
 import subprocess
-import streamlit as st
-from streamlit.web import cli as stcli
-from streamlit import runtime as st_runtime
-from streamlit_jupyter import StreamlitPatcher, tqdm
-import pandas as pd
-import numpy as np
-import plotly.express as px
+from typing import Iterable
+
 import matplotlib.pyplot as plt
-from wordcloud import WordCloud, STOPWORDS
+import numpy as np
+import pandas as pd
+import plotly.express as px
+import streamlit as st
+from streamlit import runtime as st_runtime
+from streamlit.web import cli as stcli
+from streamlit_jupyter import StreamlitPatcher, tqdm
+from wordcloud import STOPWORDS, WordCloud
 
 file_name = "app.py"
 server_port = "8502"
-DATA_URL = (
-    "streamlit-demo-data/Tweets.csv"
-)
+DATA_URL = "streamlit-demo-data/Tweets.csv"
 
 StreamlitPatcher().jupyter()  # register streamlit with jupyter-compatible wrappers
+
+
+@st.cache_data(persist=True)
+def load_data(path: str = DATA_URL) -> pd.DataFrame:
+    """Load tweet data and ensure the timestamp column is parsed.
+
+    Parameters
+    ----------
+    path
+        Relative path to the Tweets.csv file.
+
+    Returns
+    -------
+    pd.DataFrame
+        Loaded tweet data with a datetime column.
+    """
+
+    data = pd.read_csv(path)
+    data["tweet_created"] = pd.to_datetime(data["tweet_created"])
+    return data
+
+
+def sample_tweet_by_sentiment(data: pd.DataFrame, sentiment: str) -> str:
+    """Return a random tweet for the requested sentiment."""
+
+    return (
+        data.query("airline_sentiment == @sentiment")["text"]
+        .sample(n=1)
+        .iat[0]
+    )
+
+
+def get_sentiment_counts(data: pd.DataFrame) -> pd.DataFrame:
+    """Compute the number of tweets by sentiment."""
+
+    counts = data["airline_sentiment"].value_counts()
+    return pd.DataFrame({"Sentiment": counts.index, "Tweets": counts.values})
+
+
+def filter_tweets_by_hour(data: pd.DataFrame, hour: int) -> pd.DataFrame:
+    """Filter tweets for the provided hour (24h format)."""
+
+    return data[data["tweet_created"].dt.hour == hour]
+
+
+def get_airline_subset(data: pd.DataFrame, airlines: Iterable[str]) -> pd.DataFrame:
+    """Return rows where the airline is one of the provided values."""
+
+    return data[data.airline.isin(list(airlines))]
+
+
+def clean_tweets_for_wordcloud(data: pd.DataFrame, sentiment: str) -> str:
+    """Prepare tweet text for word cloud generation."""
+
+    df = data[data["airline_sentiment"] == sentiment]
+    words = " ".join(df["text"])
+    processed_words = " ".join(
+        [
+            word
+            for word in words.split()
+            if "http" not in word and not word.startswith("@") and word != "RT"
+        ]
+    )
+    return processed_words
+
+
+def render_word_cloud(processed_words: str) -> WordCloud:
+    """Generate a WordCloud object for the given text."""
+
+    return WordCloud(stopwords=STOPWORDS, background_color="white", height=640, width=800).generate(
+        processed_words
+    )
 
 
 def main():
@@ -42,23 +114,16 @@ def main():
     st.sidebar.markdown(
         "### This application is a Streamlit dashboard to analyze the sentiment of Tweets 🐦")
 
-    @st.cache_data(persist=True)
-    def load_data():
-        data = pd.read_csv(DATA_URL)
-        data["tweet_created"] = pd.to_datetime(data["tweet_created"])
-        return data
-
     data = load_data()
     # Keep the Unfiltered data for later use
-    original_data = data
+    original_data = data.copy()
 
     # Section 1 - Show Random Wweet
     st.sidebar.subheader("Show random tweet")
     random_tweet = st.sidebar.radio(
         "Sentiment", ("positive", "neutral", "negative"))
     # Return a random tweet based on the sentiment selected from the radio button
-    st.sidebar.markdown(data.query("airline_sentiment == @random_tweet")[[
-        "text"]].sample(n=1).iat[0, 0])
+    st.sidebar.markdown(sample_tweet_by_sentiment(data, random_tweet))
 
     # Section 2 - Analyze the sentiment of Tweets
     st.sidebar.markdown("### Number of tweets by sentiment")
@@ -66,10 +131,7 @@ def main():
     select = st.sidebar.selectbox(
         "Visualization type", ["Histogram", "Pie chart"], key="1")
 
-    sentiment_count = data["airline_sentiment"].value_counts()
-    # Create a new dataframe with the count of each sentiment
-    sentiment_count = pd.DataFrame(
-        {"Sentiment": sentiment_count.index, "Tweets": sentiment_count.values})
+    sentiment_count = get_sentiment_counts(data)
 
     if not st.sidebar.checkbox("Hide", True):
         st.markdown("### Number of tweets by sentiment")
@@ -93,7 +155,7 @@ def main():
     # hour = st.sidebar.number_input("Hour of day", min_value=1, max_value=24)
 
     # Filter data based on the hour selected
-    modified_data = data[data["tweet_created"].dt.hour == hour]
+    modified_data = filter_tweets_by_hour(data, hour)
     if not st.sidebar.checkbox("Hide the Map based on the hour selected", True, key="2"):
         st.markdown("### Tweets locations based on the time of day")
         st.markdown("%i tweets between %i:00 and %i:00" %
@@ -109,7 +171,7 @@ def main():
     choice = st.sidebar.multiselect(
         "Pick airlines", ("US Airways", "United", "American", "Southwest", "Delta", "Virgin America"), key="0")
     if len(choice) > 0:
-        choice_data = data[data.airline.isin(choice)]
+        choice_data = get_airline_subset(data, choice)
         fig_choice = px.histogram(choice_data, x="airline", y="airline_sentiment",
                                   histfunc="count", color="airline_sentiment",
                                   facet_col="airline_sentiment", labels={"airline_sentiment": "tweets"}, height=600, width=800)
@@ -123,12 +185,8 @@ def main():
 
     if not st.sidebar.checkbox("Hide Word Cloud", True, key="3"):
         st.header(f"Word cloud for {word_sentiment} sentiment")
-        df = data[data["airline_sentiment"] == word_sentiment]
-        words = " ".join(df["text"])
-        processed_words = " ".join(
-            [word for word in words.split() if "http" not in word and not word.startswith("@") and word != "RT"])
-        wordcloud = WordCloud(stopwords=STOPWORDS, background_color="white",
-                              height=640, width=800).generate(processed_words)
+        processed_words = clean_tweets_for_wordcloud(data, word_sentiment)
+        wordcloud = render_word_cloud(processed_words)
         plt.imshow(wordcloud)
         plt.xticks([])
         plt.yticks([])
